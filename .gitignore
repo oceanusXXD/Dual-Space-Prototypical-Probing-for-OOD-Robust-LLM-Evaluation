@@ -1,0 +1,40 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local/runtime state
+.omx/
+.DS_Store
+
+# Local datasets
+datasets/
+
+# Logs and local run records
+*.log
+*.out
+*.err
+logs/
+log/
+wandb/
+mlruns/
+tensorboard/
+
+# Generated experiment outputs and hidden-state caches
+outputs/
+artifacts/
+hiddenstates/
+experiments/**/outputs/
+*.npz
+*.npy
+*.joblib
+last_hidden_raw/
+last_hidden_raw.*
+
+# Local model checkpoints should live outside this repo.
+/model/
+/models/
+.venv/

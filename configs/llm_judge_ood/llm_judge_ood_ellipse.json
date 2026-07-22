@@ -1,0 +1,242 @@
+{
+  "input_paths": [
+    "artifacts/llm_judge_ood_ellipse/ellipse_prepared_contract_v1.jsonl"
+  ],
+  "judge_hidden_feature_path": "hiddenstates/ellipse/qwen3_5_4b_judge_input_overall_v1.npz",
+  "document_hidden_feature_path": "hiddenstates/ellipse/qwen3_5_4b_input_document_masked_mean_v1.npz",
+  "backbone_model_id": "Qwen/Qwen3.5-4B",
+  "hidden_pooling": "masked_mean",
+  "hidden_max_length": 2048,
+  "max_input_documents": 0,
+  "output_dir": "artifacts/docs_experiments/ellipse/seed_42",
+  "static_reference_cache_dir": "artifacts/docs_experiments/shared/ellipse/static_references",
+  "ood_definition": "document_distribution",
+  "judge_feature_scope": "judge_input",
+  "judge_prompt_template_version": "ellipse_overall_proficiency_v1",
+  "judge_prompt_template_sha256": "260ff91f21e414ece86541692a4f6d31a74a7ced69c511bbc4047473aa635b45",
+  "training_document_train_splits": [
+    "training_train"
+  ],
+  "training_document_drift_reference_splits": [
+    "training_drift_reference"
+  ],
+  "require_independent_drift_reference": true,
+  "training_document_calibration_splits": [
+    "training_calibration"
+  ],
+  "training_document_validation_splits": [
+    "training_validation"
+  ],
+  "training_document_guard_splits": [
+    "training_guard"
+  ],
+  "training_document_test_splits": [
+    "training_test"
+  ],
+  "development_document_splits": [
+    "development"
+  ],
+  "benchmark_document_splits": [
+    "benchmark_test"
+  ],
+  "deployment_document_stream_splits": [
+    "deployment_stream"
+  ],
+  "deployment_document_ood_evaluation_splits": [
+    "deployment_ood_evaluation"
+  ],
+  "deployment_document_adapt_splits": [
+    "deployment_adapt"
+  ],
+  "deployment_document_gate_splits": [
+    "deployment_gate"
+  ],
+  "deployment_document_future_splits": [
+    "deployment_future_test"
+  ],
+  "deployment_document_evaluation_splits": [
+    "deployment_stream",
+    "deployment_ood_evaluation",
+    "deployment_adapt",
+    "deployment_gate",
+    "deployment_future_test"
+  ],
+  "probe_budget": 20,
+  "probe_requires_behavior_warning": false,
+  "probe_min_documents": 4,
+  "probe_min_documents_per_query": 2,
+  "gate_budget": 20,
+  "gate_min_documents": 4,
+  "training_replay_budget": 20,
+  "training_drop_tolerance": 0.02,
+  "harm_tolerance": 0.15,
+  "harm_fdr_alpha": 0.1,
+  "paired_harmfulness_mode": "auto",
+  "gate_min_excess_error_improvement": 0.1,
+  "gate_max_negative_flip_rate": 0.05,
+  "gate_bootstrap_samples": 1000,
+  "bootstrap_samples": 1000,
+  "probe_metric": "mae",
+  "require_human_ceiling": false,
+  "tune_lifecycle_on_development": false,
+  "lifecycle_window_sizes": [
+    50
+  ],
+  "lifecycle_minimum_consecutive_windows": [
+    3
+  ],
+  "lifecycle_alpha_fwers": [
+    0.05
+  ],
+  "lifecycle_alpha_spendings": [
+    "pocock"
+  ],
+  "head_adapt": {
+    "weight_decay": 0.0
+  },
+  "judge": {
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "epochs": 50,
+    "batch_size": 256,
+    "patience": 6,
+    "seed": 42,
+    "device": "cpu",
+    "loss": "ce",
+    "class_values": [
+      1.0,
+      1.5,
+      2.0,
+      2.5,
+      3.0,
+      3.5,
+      4.0,
+      4.5,
+      5.0
+    ]
+  },
+  "judge_selection": {
+    "preprocess_methods": [
+      "pca_whiten"
+    ],
+    "neural_losses": [
+      "ce"
+    ],
+    "neural_seeds": [
+      42
+    ],
+    "ridge_alphas": [
+      10.0
+    ],
+    "linear_learning_rates": [
+      0.0003,
+      0.001,
+      0.003
+    ],
+    "linear_cs": [],
+    "baseline_representation": "last_layer",
+    "pca_dim": 512,
+    "include_linear": true,
+    "include_neural_ablation": false,
+    "deployment_policy": "linear_specification"
+  },
+  "ood_selection": {
+    "preprocess_methods": [
+      "pca_whiten"
+    ],
+    "representations": [
+      "last_layer"
+    ],
+    "metrics": [
+      "euclidean"
+    ],
+    "k_values": [
+      50,
+      100
+    ],
+    "pca_dim": 512,
+    "soft_quantile": 0.9,
+    "hard_quantile": 0.99,
+    "seed": 42
+  },
+  "judge_ood_selection": {
+    "detectors": [
+      "msp",
+      "odin",
+      "energy",
+      "maxlogit",
+      "mahalanobis",
+      "rmd",
+      "knn",
+      "vim",
+      "full_vim"
+    ],
+    "vim_score_variant": "residual_only",
+    "vim_ranks": [
+      64,
+      128,
+      256,
+      512
+    ],
+    "vim_include_variance_rank": true,
+    "vim_variance_target": 0.9,
+    "vim_rank_cap": 512,
+    "knn_ks": [
+      10,
+      20,
+      50,
+      100
+    ],
+    "knn_include_sqrt_k": true,
+    "knn_metric": "euclidean",
+    "knn_normalize": true,
+    "soft_quantile": 0.9,
+    "hard_quantile": 0.99
+  },
+  "window_drift": {
+    "window_size": 50,
+    "minimum_window_documents": 50,
+    "mmd_permutations": 1000,
+    "primary_test": "mmd",
+    "c2st_enabled": true,
+    "c2st_folds": 5,
+    "power_enabled": false,
+    "reference_cache_dir": "artifacts/docs_experiments/shared/ellipse/drift_references",
+    "reference_max_samples": 2000,
+    "soft_alpha": 0.05,
+    "hard_alpha": 0.01,
+    "alpha_fwer": 0.05,
+    "alpha_spending": "pocock",
+    "pocock_horizon": 8,
+    "minimum_consecutive_windows": 3,
+    "minimum_valid_calibration_windows": 20,
+    "require_sequential_fwer_calibration": true,
+    "sequential_calibration_trials": 200,
+    "sequential_calibration_seed": 42,
+    "sequential_calibration_cache_path": "artifacts/docs_experiments/shared/ellipse/sequential_h0.json"
+  },
+  "separability": {
+    "enabled": true,
+    "apply_selected_layer": true,
+    "detectable_auroc": 0.65,
+    "undetectable_auroc": 0.55,
+    "maximum_cv_folds": 5,
+    "minimum_documents_per_class": 2
+  },
+  "cluster": {
+    "method": "hybrid",
+    "min_cluster_size": 10,
+    "hdbscan_allow_single_cluster": true,
+    "mutual_k": 5,
+    "min_similarity": 0.0,
+    "hybrid_radius_multiplier": 1.5,
+    "hybrid_radius_quantile": 0.95
+  },
+  "persistence": {
+    "window_size": 50,
+    "min_share": 0.03,
+    "history_windows": 3,
+    "min_passing_windows": 3,
+    "centroid_match_max_distance": 6.0
+  }
+}

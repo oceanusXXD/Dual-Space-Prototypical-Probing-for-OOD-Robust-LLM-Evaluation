@@ -1,0 +1,21 @@
+{
+  "document_partition_fractions": {
+    "training": 52,
+    "development": 14,
+    "deployment": 34
+  },
+  "training_document_split_fractions": {
+    "training_train": 35,
+    "training_validation": 4,
+    "training_calibration": 4,
+    "training_guard": 3,
+    "training_test": 6
+  },
+  "deployment_document_split_fractions": {
+    "deployment_stream": 16,
+    "deployment_probe": 6,
+    "deployment_adapt": 4,
+    "deployment_gate": 4,
+    "deployment_future_test": 4
+  }
+}
