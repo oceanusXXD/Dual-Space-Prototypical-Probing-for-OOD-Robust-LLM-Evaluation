@@ -2,62 +2,50 @@
 
 > 目标：利用现有数据集中的原生 Ground Truth，构造“多个 Benchmark/domain × 多个 Task/rubric”的 OOD 实验。
 >
-> 核心原则：**不要求所有数据集统一成 3×3，也不要求每篇文本拥有所有任务标签。**  
-> 只要数据集中存在多个分布和多个评分任务，并且每个保留的 `domain × task` 单元有足够的原生 Ground Truth，就可以构造多×多 OOD 实验。
+> 核心原则：矩阵形状可以是 `3 x 3`、`4 x 4` 或其他预先冻结的 `m x n`，但
+> 一旦形状确定，每个保留回答必须拥有全部 `n` 个任务标签和对应 B-space。
+> 原始数据可以稀疏；正式 OOD 主实验不能稀疏。空缺必须补评分并记录，不能复制
+> 其他任务标签、补零或只改变 task 名称。
 >
-> 本文统一将数据集提供的参考标签或参考分数记为 **Ground Truth**，不再区分其生成来源。
+> 本文将参考标签统一记为 `Y`，但必须在 metadata 和结果中严格区分
+> Human-GT 与 Teacher Label，二者不能混合报告。
 
 ---
 
 ## 1. 最终结论
 
-在下面三个条件成立时，**不需要新增任何 Ground Truth**：
-
-1. 不强行补齐原始数据中不存在的 `domain × task` 单元；
-2. 不把一个已有分数复制成多个不同任务的标签；
-3. FLASK 和 Prometheus 接受原始 评分作为 Ground Truth，而不是声称为Ground Truth。
-
-需要新增的只是：
-
-```text
-domain_code
-task_code
-shift_type
-ood_label
-```
-
-这些是实验元数据，不是新的Ground Truth。
+只有 LongJudgeBench 的 DeepResearch-Bench 和 RealDR 原生对每个回答提供全部目标
+维度，不需要新增评分。RuVerBench、BiGGen-Bench、FLASK 和 Prometheus 的原始标签
+都是部分任务覆盖；要满足完整 B-space，必须先审计每个 `(input_document_id, task)`，
+再为缺项补人工或固定 Teacher 评分。
 
 最终建议如下：
 
-| 数据集                             |                       可用结构 | 矩阵类型              |       是否新增 Ground Truth |
-| ---------------------------------- | -----------------------------: | --------------------- | --------------------------: |
-| LongJudgeBench / DeepResearchBench |                          `4×4` | 完整多任务矩阵        |                      不需要 |
-| LongJudgeBench / RealDR            |                          `3×3` | 完整多任务矩阵        |                      不需要 |
-| LongJudgeBench / VerifyBench-Hard  |                   外部 far-OOD | 单任务数据            | 不需要，但不能独立构造多×多 |
-| RuVerBench                         |   两个 `1×4`；或异构稀疏 `2×4` | rubric-level 稀疏矩阵 |                      不需要 |
-| BiGGen-Bench                       | `9×K`，K 由 rubric family 决定 | 稀疏矩阵              |                      不需要 |
-| FLASK                              |               原生稀疏 `10×12` | 稀疏矩阵              |                      不需要 |
-| Prometheus                         |                     派生 `M×N` | 稀疏矩阵              |                      不需要 |
+| 数据集 | 正式目标 | B-space 验收 | 是否需要补评分 |
+|---|---:|---|---|
+| LongJudgeBench / DeepResearch-Bench | `4 x 4` | `A=200, B=800` | 不需要；原生四维人工标签齐全 |
+| LongJudgeBench / RealDR | `3 x 3` | `A=640, B=1,920` | 不需要；原生三维人工标签齐全 |
+| RuVerBench | 两个完整 `1 x 4`；共享任务时为 `2 x 4` | 每个回答均有四项 B | 覆盖审计后按回答补缺项 |
+| BiGGen-Bench | 选定 Grounding、Reasoning、Planning 的 `3 x 3` | `A=1,080, B=3,240` | 需要补 2,160 项 |
+| FLASK | Humanities、Coding、Math x 三任务的 `3 x 3` | `A=1,691, B=5,073` | 需要补 2,281 个唯一回答-任务对 |
+| Prometheus | 三个派生 domain x 三套固定 rubric 的 `3 x 3` | prepare 后为 `A=N, B=3N` | 每回答原生通常只有一项，其他项需 Teacher 评分 |
 
 | 数据集                | 多 Domain 文本分布                                                                                                                                           | 多任务类型分布                                                                                                                                                                                                                |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **DeepResearchBench** | 官方有 **22 个研究领域**。实验中可聚合为：① Science & Technology；② Business & Finance；③ Software & Internet；④ Humanities / Society / Other Applied Fields | 原生 4 个任务：**Comprehensiveness、Insight/Depth、Instruction Following、Readability**。([GitHub][1])                                                                                                                        |
+| **DeepResearchBench** | 官方有 **22 个研究领域**。实验中聚合为：① Science and Technology；② Business and Finance；③ Society and Public Policy；④ Humanities and Culture | 原生 4 个任务：**Comprehensiveness、Insight/Depth、Instruction Following、Readability**。([GitHub][1])                                                                                                                        |
 | **RealDR**            | 官方包含 **12 个学科领域**。可聚合为：① Science & Engineering；② Business & Applied Studies；③ Humanities & Social Sciences                                  | 原生 3 个任务：**Logical Structure、Presentation Form、Bias Checking**。LongJudgeBench 将 RealDR 定义为三维评分数据。([Emergent Mind][2])                                                                                     |
-| **VerifyBench-Hard**  | 没有适合主实验的多 Domain 划分，只能按题型或错误类型形成若干子分布                                                                                           | 只有一个任务：**Correctness Verification**，因此不能单独构造多 Domain × 多 Task                                                                                                                                               |
 | **RuVerBench**        | 2 个原生文本分布：① **DeepResearch** 长报告；② **AgenticCoding** 代码代理轨迹                                                                                | DeepResearch：**Format、Numbers、Logic、Facts**；AgenticCoding：**Task Completion、Planning、Tool Use、Rules/Compliance**。两个 Domain 的任务类型不同，因此属于异构多任务                                                     |
 | **BiGGen-Bench**      | 9 个 capability 分布：**Instruction Following、Grounding、Reasoning、Planning、Refinement、Multilingual、Safety、Theory of Mind、Tool Usage**                | 77 个具体任务，例如 personal assistant、compositional planning 等。任务隶属于 capability，是层级结构，不能直接视为完整 `9×77` 或 `9×9` 矩阵。([Hugging Face][3])                                                              |
 | **FLASK**             | 10 个原生 Domain：**Language、Culture、Health、History、Natural Science、Math、Social Science、Technology、Coding、Humanities**。                            | 12 个原生 Skill：**Logical Robustness、Logical Correctness、Logical Efficiency、Commonsense Understanding、Factuality、Metacognition、Insightfulness、Completeness、Comprehension、Conciseness、Readability、Harmlessness**。 |
-| **Prometheus**        | 没有原生统一 Domain。需要根据 instruction 自己分类，例如：① Knowledge/Technical；② Reasoning；③ Writing；④ Advice/Communication；⑤ Creative；⑥ Coding        | 没有原生统一任务类型。需要根据 criterion 分类，例如：① Correctness；② Instruction Fulfillment；③ Completeness；④ Clarity/Coherence；⑤ Style；⑥ Safety                                                                         |
+| **Prometheus**        | 没有原生统一 Domain。当前根据 instruction 派生：① Communication and Advice；② Knowledge/Technical Explanation；③ Writing and Revision | 没有原生统一任务类型。当前固定三套 rubric：① Correctness/Factuality；② Completeness/Instruction Fulfillment；③ Style/Context Adaptation |
 
 最清楚的分类是：
 
-- **完整多 Domain + 多任务**：DeepResearchBench、RealDR。
-- **原生多 Domain + 原生多任务，但矩阵稀疏**：FLASK。
-- **多 capability + 多下属任务**：BiGGen-Bench。
-- **两个异构 Domain，各有自己的任务体系**：RuVerBench。
-- **需要自己分类**：Prometheus。
-- **只有单任务**：VerifyBench-Hard。
+- **原生标签已经完整**：DeepResearchBench、RealDR。
+- **原生多 Domain + 多任务但每回答标签稀疏，必须补齐**：FLASK。
+- **capability 与原生 rubric 绑定，必须交叉补齐三任务**：BiGGen-Bench。
+- **两个异构 Domain，各有自己的任务体系，必须先做覆盖审计**：RuVerBench。
+- **需要自己分类并重新做三任务 Teacher 评分**：Prometheus。
 
 ---
 
@@ -119,7 +107,7 @@ DeepResearchBench
 RealDR
 ```
 
-## 2.2 稀疏矩阵
+## 2.2 稀疏原始标签与待补矩阵
 
 每篇文本只覆盖部分任务，甚至只有一个任务标签：
 
@@ -129,7 +117,8 @@ RealDR
 文本 3：D2 + T1 → Y
 ```
 
-整个数据集仍可能覆盖多个 domain 和多个 task，但并非每篇文本都有全部标签。
+整个原始数据集可能在汇总层面覆盖多个 domain 和多个 task，但并非每篇文本都有
+全部标签。
 
 代表数据：
 
@@ -140,7 +129,9 @@ FLASK
 Prometheus
 ```
 
-稀疏矩阵同样可以构造 OOD，但必须先统计每个 cell 的样本量，再选择样本充分的最大子矩阵。
+这种稀疏结构只能用于审计标签来源和估算补分成本，不能直接作为本文正式的
+Domain-OOD、Task-OOD 和 Joint-OOD 主矩阵。即使所有 cell 都非空，也必须逐回答
+补齐所选任务，直到 `B=A x n`。
 
 ---
 
@@ -174,7 +165,7 @@ N\_{d,t}
 
 得到真实的 `domain × task` 样本量矩阵。
 
-## 3.3 选择最大可用子矩阵
+## 3.3 选择目标子矩阵并补齐回答-任务对
 
 设置最低样本数：
 
@@ -183,7 +174,7 @@ N\_{d,t}
 正式实验：每个 cell 最好 ≥ 100
 ```
 
-选择最大的：
+先选择算力和标注预算可承受的：
 
 ```text
 K 个 domains × L 个 tasks
@@ -203,7 +194,15 @@ K 个 domains × L 个 tasks
 - K ≥ 2；
 - L ≥ 2；
 - 每个保留 cell 都有足够 Ground Truth；
-- 不为补齐矩阵伪造或重新复制标签。
+- 每个保留回答都有全部 `L` 个 task 标签，而不只是每格非空；
+- 缺失标签通过合法人工或冻结 Teacher 重新评分补齐；
+- 绝不复制其他任务标签。
+
+完成后还要验证：
+
+```text
+unique(input_document_id, task) = unique(input_document_id) x L
+```
 
 ## 3.4 按原始 sample_id 划分
 
@@ -273,12 +272,11 @@ ood_ground_truth: 0 或 1
 
 # 4. LongJudgeBench
 
-只使用三个 pointwise 子集：
+只使用两个多维 pointwise 子集：
 
 ```text
 DeepResearchBench
 RealDR
-VerifyBench-Hard
 ```
 
 ---
@@ -440,7 +438,7 @@ C + E
 
 ---
 
-## 4.3 VerifyBench-Hard：只作为 external far-OOD
+## 4.3 VerifyBench-Hard：当前流程排除
 
 VerifyBench-Hard 原生只有：
 
@@ -451,11 +449,11 @@ Label = correct / incorrect
 
 它无法在自身内部构造多 domain × 多 task。
 
-正确用法是：
+它可以在其他实验中作为单任务 external far-OOD，但不属于本次五数据集 dense
+B-space 流程，不下载、不准备、不提取：
 
 ```text
-DeepResearchBench 或 RealDR 作为 ID 主矩阵
-VerifyBench-Hard 作为 external far-OOD
+本次状态 = excluded
 ```
 
 例如：
@@ -504,11 +502,15 @@ Task E = Logic
 Task R = Facts
 ```
 
-形成：
+目标形成：
 
 ```text
 1 domain × 4 tasks
 ```
+
+但“原始 check 汇总后四类都出现过”不等于完整。已知 284 个 DeepResearch 回答时，
+必须逐回答确认 Format、Numbers、Logic、Facts 四项都存在；规范化为每回答每任务
+一条时，目标为 `A=284, B=1,136`。缺项要补评分。
 
 ## 5.2 AgenticCoding：`1×4`
 
@@ -521,11 +523,14 @@ Task E = Tool Use
 Task R = Rules / Compliance
 ```
 
-形成：
+目标形成：
 
 ```text
 1 domain × 4 tasks
 ```
+
+Agentic Coding 必须先接入已下载的 dataset、labels、taxonomy 和 trajectories 四份
+文件，再统计唯一回答数及每回答四任务覆盖。
 
 ## 5.3 能否构造 `2×4`
 
@@ -533,7 +538,7 @@ Task R = Rules / Compliance
 
 ```text
 2 domains × 4 task positions
-= 异构稀疏 2×4
+= 两个任务语义不同的面板
 ```
 
 但两个 domain 的任务语义不同：
@@ -556,7 +561,7 @@ A + Q → B + Q
 
 ### 推荐用法
 
-主报告分别做：
+在各自回答四任务都补齐后，可分别做：
 
 ```text
 DeepResearch 1×4：只研究 task shift
@@ -571,11 +576,9 @@ cross-domain + cross-task comprehensive OOD
 
 ### 是否需要新增 Ground Truth
 
-```text
-完全不需要。
-```
-
-若强行要求两个 domain 共享完全相同的四个 task，则需要重新定义和重新标注；当前方案不这样做。
+需要先逐回答审计。原生 check 已覆盖的回答-任务对可复用，缺失项必须补人工评分。
+若要求两个 domain 共享完全相同的四个 task，还必须冻结跨域同义 rubric，并对与
+共享 rubric 不等价的原生项重新标注。未完成该步骤时不能声称纯 Domain-OOD。
 
 ---
 
@@ -627,29 +630,29 @@ Tool Usage score
 
 因此原生结构不是 dense `9×9`。
 
-## 6.2 无需新 GT 的正确构造：稀疏 `9×K`
+## 6.2 当前正式目标：完整 `3 x 3`
 
 ### Domain 轴
 
-直接使用九个原生 capability：
+当前选择三个原生 capability 作为 domain：
 
 ```text
-D1 ... D9 = 9 capabilities
+D1 = Grounding
+D2 = Reasoning
+D3 = Planning
 ```
 
 ### Task 轴
 
-对 `score_rubric.criteria` 做确定性 taxonomy 映射。建议先使用五个跨 capability 的 rubric families：
+冻结三套跨 domain 通用 rubric：
 
 ```text
-T1 = Requirement / Instruction Satisfaction
-T2 = Correctness / Validity
-T3 = Completeness / Coverage
-T4 = Coherence / Overall Quality
-T5 = Safety / Constraint Compliance
+T1 = Requirement / Grounding Satisfaction
+T2 = Correctness
+T3 = Completeness
 ```
 
-每条样本只分配到一个最主要的 task family：
+原始每条样本只能先支持一个最主要的 task：
 
 ```yaml
 capability: Planning
@@ -669,7 +672,8 @@ human_score: 4
 4. 低置信样本删除；
 5. 抽样检查分类质量。
 
-这一步只是生成 task metadata，不改变原始 `human_score`。
+这一步只确定现有 `human_score` 属于哪个 task，不能产生同一回答另外两个 task 的
+标签。
 
 ### 统计和筛选
 
@@ -679,59 +683,33 @@ human_score: 4
 N\_{\text{capability},\text{rubric family}}
 \]
 
-候选矩阵为：
+当前旧 prepared 数据是三个对角单元：
 
-```text
-9×5 sparse matrix
-```
+| Domain | Requirement/Grounding Satisfaction | Correctness | Completeness |
+|---|---:|---:|---:|
+| Grounding | 400 | 0 | 0 |
+| Reasoning | 0 | 400 | 0 |
+| Planning | 0 | 0 | 280 |
 
-随后选择所有 cell 都达到最低样本数的最大子矩阵，例如：
-
-```text
-6×4
-5×5
-7×3
-```
-
-最终矩阵大小由真实计数决定，不能预先声称一定是 `9×5` 或 `9×9`。
+旧结果为 `A=1,080, B=1,080`。完整目标必须是 `B=1,080 x 3=3,240`，
+因此缺少 2,160 个回答-任务标签和对应 B hidden state。
 
 ### OOD 构造示例
 
-若最终保留 `6×4`：
+完整 `3 x 3` 的构造：
 
 ```text
-ID Train:
-Grounding + Requirement Satisfaction
-
-Domain OOD:
-Reasoning + Requirement Satisfaction
-Planning + Requirement Satisfaction
-...
-
-Task OOD:
-Grounding + Correctness
-Grounding + Completeness
-Grounding + Coherence
-
-Joint OOD:
-Reasoning + Correctness
-Planning + Completeness
-...
+ID Train: Grounding + Requirement/Grounding Satisfaction
+Domain OOD: Reasoning/Planning + Requirement/Grounding Satisfaction
+Task OOD: Grounding + Correctness/Completeness
+Joint OOD: Reasoning/Planning + Correctness/Completeness
 ```
 
 ### 是否需要新增 Ground Truth
 
-```text
-完全不需要。
-```
-
-前提是：
-
-- 只使用已有 `human_score` 作为 Ground Truth；
-- 不补空 cell；
-- 不要求同一文本具有多个 rubric family 分数。
-
-如果要求真正 dense `9×9`，才需要对每篇回答重新进行九次评分；本方案不做。
+需要。若保持 Human-GT track，三个非空对角单元的 1,080 个 `human_score` 可复用，
+其余六个单元共 2,160 项必须由人工按冻结 rubric 评分。若使用固定强模型补齐，
+则整个补齐版本必须标为 Teacher-Label track，不能与人工分数混称 Human-GT。
 
 ---
 
@@ -821,59 +799,45 @@ Humanities + Conciseness → 4
 
 不要把同一文本复制到多个 domain，否则容易在训练和测试之间形成重复内容。
 
-## 7.5 构造最大稠密子矩阵
+## 7.5 正式目标 `3 x 3`
 
-先建立真实 `10×12` count matrix：
-
-\[
-N\_{d,s}
-\]
-
-再选择满足最低样本数的最大子矩阵：
+当前冻结：
 
 ```text
-K domains × L skills
+Domains = Humanities / Coding / Math
+Tasks = Logical Correctness / Comprehension / Conciseness
 ```
 
-结果可能是：
+旧归档包含 1,691 个唯一回答、3,576 条原始 B 行，但只有 2,792 个唯一
+`(input_document_id, task)`；另有 784 条重复回答-任务行。完整目标为：
 
 ```text
-7×5
-6×6
-5×8
+A = 1,691
+B = 1,691 x 3 = 5,073
+缺失唯一回答-任务对 = 2,281
 ```
 
-不需要强行降为 `4×4`。
+九个 cell 当前都非空并不等于完成，因为 1,169 个回答只覆盖一个或两个目标任务，
+只有 522 个回答覆盖全部三个任务。
 
 ## 7.6 OOD 构造
 
-假设最终得到 `6×6`：
+完整 `3 x 3`：
 
 ```text
-ID Train:
-Domain A + Logical Correctness
-
-Domain OOD:
-其他 5 个 domain + Logical Correctness
-
-Task OOD:
-Domain A + 其他 5 个 skills
-
-Joint OOD:
-其他 domain + 其他 skill
+ID Train: Humanities + Logical Correctness
+Domain OOD: Coding/Math + Logical Correctness
+Task OOD: Humanities + Comprehension/Conciseness
+Joint OOD: Coding/Math + Comprehension/Conciseness
 ```
 
 必须按原始 sample_id 分组切分。
 
 ### 是否需要新增 Ground Truth
 
-```text
-完全不需要。
-```
-
-前提是接受 原始 skill score 作为 Ground Truth。
-
-若要求所有 10×12 cell 都是评分，或要求每篇文本都有全部 12 个 skill score，才需要重新标注；当前方案不要求。
+需要补 2,281 个唯一回答-任务 Teacher 分数。现有 GPT-4 skill score 可用于已覆盖
+的组合；缺项必须使用同一冻结 Teacher 和相同 rubric 重新评分。若需要 Human-GT，
+再从九格抽取平衡测试集做双人评分与仲裁。
 
 ---
 
@@ -889,19 +853,17 @@ Feedback Collection 原生约包含：
 一个 1–5 Ground Truth score
 ```
 
-它没有统一 domain 字段，但数据规模足够大，可以派生多×多稀疏矩阵。
+它没有统一 domain 字段。正式目标是派生三个 domain，并为每个保留回答重新生成
+三套固定任务评分，得到完整 `3 x 3`。
 
 ## 8.1 Domain 轴
 
-根据 `orig_instruction` 做固定 taxonomy 分类。建议初始设置六类：
+根据 `orig_instruction` 做固定 taxonomy 分类，当前保留三类：
 
 ```text
-D1 = Knowledge and Technical Explanation
-D2 = Reasoning and Problem Solving
+D1 = Communication and Advice
+D2 = Knowledge and Technical Explanation
 D3 = Writing and Revision
-D4 = Communication and Advice
-D5 = Creative Generation
-D6 = Coding and Structured Tasks
 ```
 
 分类步骤：
@@ -914,66 +876,46 @@ D6 = Coding and Structured Tasks
 
 ## 8.2 Task 轴
 
-根据 `orig_criteria` 将约 996 个 rubric 归为六类：
+原始约 996 个 criteria 只用于判断现有分数与哪套目标 rubric 最接近。正式任务固定为：
 
 ```text
 T1 = Correctness / Factuality
-T2 = Instruction Fulfillment
-T3 = Completeness / Coverage
-T4 = Clarity / Coherence
-T5 = Style / Context Adaptation
-T6 = Safety / Appropriateness
+T2 = Completeness / Instruction Fulfillment
+T3 = Style / Context Adaptation
 ```
 
-每条数据只分配到一个最主要的 task family。
+每条原始数据通常只能直接支持一个最主要的 task；另外两个 task 必须重新评分。
 
 ## 8.3 候选矩阵
 
-初始候选：
+正式目标：
 
 ```text
-6 domains × 6 rubric families
-= sparse 6×6
+3 domains × 3 fixed rubrics
+= complete 3×3
 ```
 
-随后统计真实 cell 数量，并删除过少的 domain 或 task，得到最大可用子矩阵。
-
-由于总数据量接近 10 万，Prometheus 比 BiGGen-Bench 更可能形成较大的稠密子矩阵。
+完整 prepare 后先确定三个 domain 中的唯一回答数 `N`。必须为每个回答生成三项
+Teacher 分数和三条 B，验收数量为 `A=N, B=3N`。可先冻结分层抽样子集控制成本，
+但抽样子集内部仍必须每回答三任务齐全。
 
 ## 8.4 OOD 构造
 
-例如最终保留 `5×6`：
+完整 `3 x 3`：
 
 ```text
-ID Train:
-Knowledge Explanation + Correctness
-
-Domain OOD:
-其他 domain + Correctness
-
-Task OOD:
-Knowledge Explanation + 其他 rubric families
-
-Joint OOD:
-其他 domain + 其他 rubric families
+ID Train: Communication and Advice + Correctness/Factuality
+Domain OOD: 其他两个 domain + Correctness/Factuality
+Task OOD: Communication and Advice + 其他两个 task
+Joint OOD: 其他两个 domain + 其他两个 task
 ```
 
 ## 8.5 是否需要新增 Ground Truth
 
-```text
-完全不需要。
-```
-
-保留每条数据原有的：
-
-```text
-orig_score
-orig_feedback
-```
-
-domain 和 task family 只是派生元数据。
-
-如果要求同一回答同时拥有六个 rubric 分数，才需要重新 teacher 评分；当前方案不要求。
+需要。原始 `orig_score` 和 `orig_feedback` 只对应原 `orig_criteria`；仅当它与某套
+冻结 rubric 语义一致时才能复用。其余回答-任务对必须由同一版本强 Teacher 评分，
+并保存模型 revision、模板 SHA-256 和评分时间。人工 Ground Truth 测试集另行分层
+抽取。
 
 ---
 
@@ -997,49 +939,46 @@ task shift
 domain + task joint shift
 ```
 
-## 9.2 稀疏矩阵实验
+## 9.2 需要补齐后才能进入主实验
 
 ```text
 RuVerBench:
-两个 1×4
-或异构 2×4
+两个完整 1×4
+或共享 rubric 的完整 2×4
 
 BiGGen-Bench:
-9×K sparse matrix
-最终使用最大稠密子矩阵
+Grounding / Reasoning / Planning
+× Requirement Satisfaction / Correctness / Completeness
+= 完整 3×3
 ```
 
-## 9.3 大规模稀疏矩阵实验
+## 9.3 大规模 Teacher-Label 完整矩阵
 
 ```text
 FLASK:
-原生 sparse 10×12
-最终使用最大稠密子矩阵
+Humanities / Coding / Math
+× Logical Correctness / Comprehension / Conciseness
+= 完整 3×3
 
 Prometheus:
-派生 sparse M×N
-最终使用最大稠密子矩阵
+三个派生 domain × 三套固定 rubric
+= 完整 3×3
 ```
 
-## 9.4 External far-OOD
+## 9.4 当前排除项
 
 ```text
-VerifyBench-Hard
+VerifyBench-Hard：二分类单任务，不进入当前 hidden-state 运行清单
 ```
 
 ---
 
-# 10. 是否完全不需要补 Ground Truth
+# 10. 哪些数据需要补 Ground Truth
 
 ## 10.1 当前推荐方案
 
-结论：
-
-```text
-是，完全不需要新增 Ground Truth。
-```
-
-具体包括：
+结论：只有 LongJudgeBench 两个多维子集不需要新增评分；其余数据必须按每回答
+每任务审计并补齐。
 
 ```text
 DeepResearchBench：
@@ -1049,49 +988,47 @@ RealDR：
 直接使用三个原生 Ground Truth
 
 VerifyBench-Hard：
-直接使用二分类 Ground Truth
+当前流程已排除
 
 RuVerBench：
-直接使用rubric-level 二分类 Ground Truth
+复用已有 rubric-level 二分类；缺失回答-任务对补人工评分
 
 BiGGen-Bench：
-直接使用 human_score
+复用 1,080 个原生 human_score；补 2,160 个回答-任务分数
 
 FLASK：
-直接使用原始 skill-level Ground Truth
+复用已有唯一回答-任务 Teacher 分数；补 2,281 个缺失对
 
 Prometheus：
-直接使用原始 custom-rubric Ground Truth
+原始 custom-rubric 分数按语义复用；其余任务重新 Teacher 评分
 ```
 
 ## 10.2 仍然需要做的工作
 
-以下工作不属于 Ground Truth 标注：
+除补评分外，仍需完成：
 
 ```text
 1. domain 聚合；
 2. rubric taxonomy 映射；
 3. 宽表转长表；
 4. cell count 统计；
-5. 最大稠密子矩阵选择；
+5. 目标完整子矩阵选择；
 6. OOD label 自动生成；
 7. 按 sample_id 防泄漏切分。
 ```
 
-## 10.3 哪些要求会迫使你补 Ground Truth
+## 10.3 完整性验收
 
-只有提出以下额外要求时才需要补标：
+对冻结 `n` 个任务的每个数据集必须同时满足：
 
 ```text
-1. 每篇文本必须拥有所有 task 的分数；
-2. 所有理论 cell 必须被填满；
-3. BiGGen-Bench 必须做 dense 9×9；
-4. FLASK 每篇文本必须有全部 12 个 skill 分数；
-5. Prometheus 每篇文本必须有全部 rubric family 分数；
-6. FLASK 和 Prometheus 必须全部改成Ground Truth。
+unique A = N
+unique (input_document_id, task) labels = N x n
+unique B = N x n
+每个 input_document_id 的 task_count = n
 ```
 
-当前实验不需要这些要求，因此不需要补 Ground Truth。
+只统计 cell 非零、只生成 task metadata 或只保存原始 sparse B 都不能通过验收。
 
 ---
 
@@ -1103,18 +1040,16 @@ DeepResearchBench 4×4
 RealDR 3×3
 
 第二阶段：
-FLASK sparse 10×12 → 最大稠密子矩阵
-BiGGen-Bench 9×K → 最大稠密子矩阵
+BiGGen-Bench 补齐完整 3×3
+FLASK 补齐完整 3×3
 
 第三阶段：
-Prometheus M×N → 最大稠密子矩阵
-RuVerBench 两个 1×4
-
-外部测试：
-VerifyBench-Hard far-OOD
+RuVerBench 两个完整 1×4；需要纯 domain shift 时补共享 2×4
+Prometheus 完整 3×3
 ```
 
-这样能够先用两个完整人工多任务数据验证算法，再用更大的稀疏矩阵测试泛化能力。
+这样先用无需新增评分的 LongJudgeBench 验证算法，再处理需要额外人工或 Teacher
+评分的数据，避免继续生成无法用于正式 dense OOD 实验的稀疏 B cache。
 
 ---
 
