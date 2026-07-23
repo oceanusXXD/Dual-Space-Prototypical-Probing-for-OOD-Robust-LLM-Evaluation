@@ -198,3 +198,93 @@ cell 指标用于观察不同领域和 Skill 上的评分表现。
 | Exact Accuracy | 预测分数与标签完全相同的比例 |
 | ±1 Accuracy | 预测分数与标签相差至多 1 分的比例 |
 | Quadratic Weighted Kappa | 有序 1–5 分数的一致性 |
+
+
+
+• 下面是官方 gpt4_review.jsonl 里 question_id=19 的真实记录。
+
+  {
+    "question_id": 19,
+
+    "text": "Design a soothing pastel color palette for your slides... Choose up to five colors or color codes.",
+
+    "answer": "Color codes: #FDB3AE  #CAE4E2  #FBDF74",
+
+    "domain_labeled": ["Culture", "Technology"],
+
+    "metrics": [
+      "Commonsense Understanding",
+      "Comprehension",
+      "Conciseness"
+    ],
+
+    "target_txt": "Absolutely, I'd love to help you design a soothing pastel color palette for your slides.
+  1. Pastel Pink: EFCFE8
+  2. Pastel Blue: A5DEF1
+  3. Pastel Lavender: DCD2F3
+  4. Pastel Green: CEF9C6
+  5. Pastel Yellow: FDF5B8
+  ...",
+
+    "score": {
+      "commonsense understanding": 5,
+      "comprehension": 5,
+      "conciseness": 4
+    }
+  }
+
+  A-space 从这条记录得到一条回答行：
+
+  {
+    "base_id": "19",
+    "response_id": "gpt4_review::19",
+    "candidate_response": "target_txt 的完整内容",
+    "domain_ids": ["Culture", "Technology"],
+    "generator_id": "gpt4_review"
+  }
+
+  A 的核心文本只有：
+
+  target_txt
+
+  B-space 由同一条 target_txt 加上“当前要评哪个 Skill”的全部上下文构成。这里产生三条 B 行。
+
+  B1
+  instruction        = text
+  reference_answer   = answer
+  task_id            = Commonsense Understanding
+  rubric             = Commonsense Understanding 的评分说明
+  candidate_response = target_txt
+  ground_truth       = score["commonsense understanding"] = 5
+  domain_ids         = [Culture, Technology]
+
+  B2
+  instruction        = text
+  reference_answer   = answer
+  task_id            = Comprehension
+  rubric             = Comprehension 的评分说明
+  candidate_response = target_txt
+  ground_truth       = score["comprehension"] = 5
+  domain_ids         = [Culture, Technology]
+
+  B3
+  instruction        = text
+  reference_answer   = answer
+  task_id            = Conciseness
+  rubric             = Conciseness 的评分说明
+  candidate_response = target_txt
+  ground_truth       = score["conciseness"] = 4
+  domain_ids         = [Culture, Technology]
+
+  字段关系可以记成：
+
+  A = target_txt
+
+  B = text
+    + answer
+    + 当前 task_id
+    + 当前 task 的 rubric
+    + target_txt
+    → 当前 task 的 score
+
+  domain_labeled 附在 B 行上用于归入 Culture × Task 与 Technology × Task 两个 cell；它不改变 B1、B2、B3 的分数。

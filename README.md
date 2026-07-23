@@ -74,7 +74,45 @@ The frozen cache contract separates document OOD from Judge behavior:
 | `input_document` | A-space and document OOD monitor | Raw `input_document_text` only. |
 | `judge_input` | Query-conditioned Judge and B-space | The prepared Judge input, including the query/dimension, source document, and candidate response. |
 
-ASAP uses `judge_feature_scope=judge_input`: its Judge/B cache encodes the frozen scoring template, task, rubric, and essay, while A-space encodes only the essay text. SummEval also uses `judge_feature_scope=judge_input` and a per-query linear head: its Judge/B cache is separate, while A-space remains document-only. Every cache and resumable-parts manifest must declare the pinned requested/resolved revision and architecture, `model_id=Qwen/Qwen3.5-4B`, its scope-specific `feature_scope` and prompt-template version, `pooling=masked_mean`, the exact attention-mask pooling formula, `pooling_mask_source=tokenizer_attention_mask`, `pooling_excludes_padding=true`, `labels_in_prompt=false`, `max_length=2048`, `model_eval=true`, and `requires_grad=false`. Other cache contracts are rejected.
+ASAP uses `judge_feature_scope=judge_input`: its Judge/B cache encodes the frozen scoring template, task, rubric, and essay, while A-space encodes only the essay text. SummEval also uses `judge_feature_scope=judge_input` and a per-query linear head: its Judge/B cache is separate, while A-space remains document-only. Every cache and resumable-parts manifest must declare the pinned requested/resolved revision and architecture, `model_id=Qwen/Qwen3.5-4B`, its scope-specific `feature_scope`, prompt-template version, representation kind, selected token policy or pooling formula, `labels_in_prompt=false`, `max_length=2048`, `model_eval=true`, and `requires_grad=false`. Other cache contracts are rejected.
+
+### Hidden-State Representation Policy
+
+Do not treat one hidden-state rule as universal. A-space and B-space answer different questions, and even within B-space there are at least three separable signals:
+
+1. **document / response distribution**: what kind of text is being judged;
+2. **rubric / task conditioning**: which criterion the Judge is applying;
+3. **decision state**: the hidden state immediately before the Judge would emit a score, label, or class option.
+
+The final protocol should therefore store a named representation bundle instead of pretending that one vector is always correct:
+
+| View name | What it captures | How to compute | Typical consumer |
+|---|---|---|---|
+| `input_document_masked_mean` | Raw input or candidate-answer distribution | Attention-mask mean over `input_document_text` only | A-space OOD, clustering, retrieval/localization |
+| `candidate_span_mean` | Candidate response semantics inside the Judge prompt | Mean over the candidate-response token span after template rendering | Response-quality diagnostics, long-input robustness |
+| `rubric_task_span_mean` | The current task/rubric/check definition | Mean over rubric, task, criteria, or check tokens | Task/rubric OOD, check clustering |
+| `judge_prompt_masked_mean` | Coarse mixture of rubric, instruction, reference, and candidate text | Attention-mask mean over the full label-free `judge_input_text` | Auxiliary B-space diagnostics and legacy-cache reuse |
+| `pre_answer_token` | The Judge state after reading the full prompt and answer prefix | Append a fixed answer prefix, then take the final prompt token hidden state | Parent view for score/label/classification decisions |
+| `pre_score_token` | Numeric score decision state | `pre_answer_token` with a score prefix such as `Score:` or `{"score":` | Ordinal/regression score heads, Direct Judge scoring |
+| `pre_label_token` | Binary or categorical label decision state | `pre_answer_token` with `Label:`, `Answer:`, or class-option prefix | Pass/fail checks, intent/topic classification |
+| `answer_logits` | The actual next-token preference over allowed score/label tokens | Logits at `pre_answer_token`, restricted to the frozen allowed vocabulary | Direct Judge baselines, confidence/energy diagnostics |
+
+No view is a universal replacement for the others. `pre_score_token` is often the best single vector for a scoring head, but it can hide useful covariate-shift structure because it compresses the whole prompt into a decision boundary state. Conversely, `judge_prompt_masked_mean` is good at noticing rubric/content distribution changes, but it is usually weaker for predicting the final score because it averages many tokens that are not near the decision point.
+
+Dataset-specific policy:
+
+| Dataset family | Label / decision structure | Recommended A-space | Recommended B-space bundle | Rationale |
+|---|---|---|---|---|
+| ASAP AES / ELLIPSE | Ordinal essay-quality scores under a rubric | `input_document_masked_mean` over the essay | `candidate_span_mean` + `rubric_task_span_mean` + `pre_score_token`; optionally `answer_logits` over score tokens | Essay distribution shift and rubric-conditioned scoring are different. The score head should see the decision token, while OOD/localization still benefits from essay-span and rubric-span views. |
+| SummEval | Query-specific summary quality scores for candidate summaries against a source article | For production document OOD: article `input_document_masked_mean`; for candidate-response diagnostics: optional summary `candidate_span_mean` | One B row per query with `candidate_span_mean`, query/rubric span mean, `pre_score_token`, and score logits | Full-prompt mean can be dominated by the source article. Dimension-level scoring should be anchored near the answer token, while summary/content shift should be measured separately. |
+| CLINC150 / ROSTD / AG News | Intent, OOS, or topic classification, not scalar judging | `input_document_masked_mean` over utterance/news text | `pre_label_token` plus allowed-class logits; `judge_prompt_masked_mean` is optional | The decision is a class label, so “score token” is the wrong abstraction. OOD may be stronger in input-text mean, while classifier behavior should use label-option state/logits. |
+| LongJudgeBench | Long report quality; native dimensions or weighted multi-dimension totals | `input_document_masked_mean` over the candidate report | For final dense matrix: per-dimension `rubric_task_span_mean` + `candidate_span_mean` + `pre_score_token`; for weighted-total legacy runs, keep a separate representation identity | Per-dimension labels and weighted totals are different tasks. Do not mix a weighted-total cache with future per-dimension score-token caches. |
+| RuVerBench | Atomic binary rubric/check coverage over reports or agent traces | `input_document_masked_mean` over report/trace | `rubric_task_span_mean` for each check + `candidate_span_mean` + `pre_label_token` / yes-no logits; optionally aggregate check-level B views to task-level summaries | These are binary check decisions, not numeric scores. The check text itself is a major part of the task distribution, so keeping the check/rubric span is important. |
+| BiGGen-Bench | Human score or frozen rubric score for candidate responses; some cross-task labels may be missing | `input_document_masked_mean` over candidate response | `rubric_task_span_mean` + `candidate_span_mean` + `pre_score_token`; separate metadata for human-GT vs teacher-filled labels | Instance-specific natural unit tests/rubrics make the rubric view important. Teacher-completed cross-task rows must not be mixed with original human-score rows without track metadata. |
+| FLASK | Skill-specific 1–5 GPT-4 teacher scores; multi-domain memberships share the same response-skill label | `input_document_masked_mean` over `candidate_response` | Final score-head cache should use `rubric_task_span_mean` + `candidate_span_mean` + `pre_score_token` / score logits. The existing `artifacts/flask_full_b_space/` cache is `judge_prompt_masked_mean` and should be treated as auxiliary or an explicit ablation. | FLASK task/rubric is central, but the candidate answer also carries domain/style shift. The uploaded mean-pooled B-space is useful, but it is not the final decision-state representation if the protocol moves to score-token features. |
+| Prometheus | Custom-rubric teacher scores over original responses | `input_document_masked_mean` over `orig_response` | `rubric_task_span_mean` + `candidate_span_mean` + `pre_score_token`; optionally score logits | Free-form criteria can dominate behavior. Domain/task labels and teacher scores remain metadata and must never enter the prompt as labels. |
+
+Acceptance rule: cache metadata must include `representation_kind` or `representation_bundle`, `feature_scope`, `prompt_template_version`, selected layers, truncation policy, span-boundary policy, answer-prefix text, and the exact token-selection or pooling formula. A cache containing only `judge_prompt_masked_mean` must not be silently consumed where a config asks for `pre_score_token`, `pre_label_token`, segmented span views, or logits.
 
 ### Judge Behavior OOD
 
@@ -223,7 +261,14 @@ hidden-state caches:
 ```
 
 The adapters have been checked against official files for LongJudgeBench,
-RuVerBench, BiGGen-Bench, FLASK, and Prometheus.
+RuVerBench, BiGGen-Bench, FLASK, and Prometheus. Before launching a GPU
+extraction, choose the representation bundle from the policy table above. The
+retained script-20/script-35 path currently writes single-view `masked_mean`
+caches; use it for A-space and for auxiliary B-space diagnostics only. Final
+scoring/classification heads for the benchmark-ground-truth datasets should use
+a bundle extractor that records the relevant span means, `pre_score_token` or
+`pre_label_token`, and optional allowed-answer logits unless the experiment
+explicitly declares a `judge_prompt_masked_mean` ablation.
 
 This registry uses `truncation_strategy=head_tail`. For long Judge inputs the
 frozen v2 templates put the rubric before the instruction, then retain the
@@ -237,7 +282,7 @@ Input-document caches contain one row per unique document and have shape:
 [num_unique_input_documents, num_selected_layers, 2560]
 ```
 
-The loader validates the document fingerprint and broadcasts each document row to related Judge records. Judge-input caches instead contain one row per Judge record, validate the record fingerprint, and align by `sample_id`, `query_id`, and `input_document_id`. Cache metadata records the exact model identity, freeze/eval state, tokenizer attention-mask pooling, truncation length and strategy, source fingerprint, and the corresponding alignment identifiers.
+The loader validates the document fingerprint and broadcasts each document row to related Judge records. Judge-input caches instead contain one row per Judge record, validate the record fingerprint, and align by `sample_id`, `query_id`, and `input_document_id`. Cache metadata records the exact model identity, freeze/eval state, representation kind, token-selection or pooling rule, truncation length and strategy, source fingerprint, and the corresponding alignment identifiers.
 
 Build the document/OOD cache required by every configuration:
 
@@ -254,7 +299,7 @@ Build the document/OOD cache required by every configuration:
   --torch-dtype bfloat16
 ```
 
-SummEval configurations also require a second, response-aware Judge cache. Existing SummEval `input_document` Judge caches do not satisfy this contract and must be re-extracted:
+SummEval configurations also require a second, response-aware Judge cache. Existing SummEval `input_document` Judge caches do not satisfy this contract and must be re-extracted. The command below produces the legacy/auxiliary `judge_prompt_masked_mean` cache; for final score-head runs, replace it with a bundle extractor that uses the same prompt template and records `candidate_span_mean`, query/rubric span metadata, `pre_score_token`, and optional score logits:
 
 ```bash
 .venv/bin/python scripts/llm_judge_ood/20_prepare_llm_judge_ood_hidden.py \

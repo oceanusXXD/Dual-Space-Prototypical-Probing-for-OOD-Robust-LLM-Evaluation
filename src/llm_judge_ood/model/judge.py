@@ -33,6 +33,7 @@ class JudgeTrainingConfig:
     seed: int = 42
     device: str = "cpu"
     loss: str = "ce"
+    class_weight: str | None = None
     class_values: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
@@ -41,6 +42,8 @@ class JudgeTrainingConfig:
             raise ValueError("class_values must not contain duplicates")
         if str(self.loss).lower() != "ce":
             raise ValueError("Only CE classification heads are supported by the deployed Judge contract")
+        if self.class_weight is not None and str(self.class_weight).lower() != "balanced":
+            raise ValueError("class_weight must be None or 'balanced'")
         object.__setattr__(self, "class_values", values)
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,12 +74,35 @@ class SharedFeatureBackbone(nn.Module):
         return self.network(mixed)
 
 
-def _classification_loss(logits: Tensor, targets: Tensor, loss: str, num_classes: int) -> Tensor:
+def _class_weight_tensor(
+    targets: np.ndarray,
+    *,
+    num_classes: int,
+    mode: str | None,
+    device: torch.device,
+) -> Tensor | None:
+    if mode is None or str(mode).lower() != "balanced":
+        return None
+    counts = np.bincount(np.asarray(targets, dtype=np.int64), minlength=int(num_classes)).astype(np.float32)
+    present = counts > 0
+    weights = np.zeros(int(num_classes), dtype=np.float32)
+    if present.any():
+        weights[present] = float(len(targets)) / (float(present.sum()) * counts[present])
+    return torch.as_tensor(weights, dtype=torch.float32, device=device)
+
+
+def _classification_loss(
+    logits: Tensor,
+    targets: Tensor,
+    loss: str,
+    num_classes: int,
+    class_weights: Tensor | None = None,
+) -> Tensor:
     if str(loss).lower() != "ce":
         raise ValueError("Only CE classification heads are supported")
     if logits.shape[-1] != int(num_classes):
         raise ValueError(f"CE head must have {int(num_classes)} outputs, got {logits.shape[-1]}")
-    return F.cross_entropy(logits, targets)
+    return F.cross_entropy(logits, targets, weight=class_weights)
 
 
 def pooled_source_space(features: np.ndarray) -> np.ndarray:
@@ -107,6 +133,7 @@ class SharedBackboneJudge:
         self.best_epoch_: int | None = None
         self.last_epoch_: int | None = None
         self.best_validation_: dict[str, float] = {}
+        self.class_weights_: Tensor | None = None
 
     def fit(
         self,
@@ -144,6 +171,12 @@ class SharedBackboneJudge:
         encoded = np.asarray([class_to_index[value] for value in normalized_labels], dtype=np.int64)
         train_indices = np.flatnonzero(train_mask)
         validation_indices = np.flatnonzero(validation_mask)
+        self.class_weights_ = _class_weight_tensor(
+            encoded[train_indices],
+            num_classes=len(self.classes_),
+            mode=self.config.class_weight,
+            device=self.device_,
+        )
         optimizer = torch.optim.AdamW(
             list(self.backbone.parameters()) + list(self.heads.parameters()),
             lr=float(self.config.learning_rate),
@@ -180,7 +213,10 @@ class SharedBackboneJudge:
                 for query_id in sorted(set(batch_q.tolist())):
                     mask = torch.as_tensor(batch_q == query_id, dtype=torch.bool, device=self.device_)
                     head = self.heads[query_id]
-                    losses.append(_classification_loss(head(shared[mask]), batch_y[mask], self.config.loss, len(self.classes_)))
+                    losses.append(_classification_loss(
+                        head(shared[mask]), batch_y[mask], self.config.loss,
+                        len(self.classes_), self.class_weights_,
+                    ))
                 if not losses:
                     continue
                 loss = torch.stack(losses).mean()
@@ -333,6 +369,10 @@ class SharedBackboneJudge:
             "best_epoch": self.best_epoch_,
             "last_epoch": self.last_epoch_,
             "best_validation": self.best_validation_,
+            "class_weights": (
+                self.class_weights_.detach().cpu().tolist()
+                if self.class_weights_ is not None else None
+            ),
         }
 
     def save_checkpoints(self, output_dir: str | Path) -> dict[str, str]:
@@ -431,6 +471,7 @@ class SharedBackboneJudge:
                         y_all[indices][mask],
                         self.config.loss,
                         len(self.classes_),
+                        self.class_weights_,
                     )
                 )
         return float(torch.stack(losses).mean().cpu()) if losses else float("nan")
