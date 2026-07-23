@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch import nn
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +43,27 @@ from src.models.extract_hidden import load_qwen_model
 MODEL_ID = "Qwen/Qwen3.5-0.8B"
 MODEL_REVISION = "2fc06364715b967f1860aea9cf38778875588b17"
 DEFAULT_LOCAL_MODEL_PATH = Path("models/qwen3.5-0.8b")
+ATTENTION_MLP_LORA_MODULES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+VISION_MODULE_KEYWORDS = (
+    "visual",
+    "vision",
+    "vision_tower",
+    "vision_model",
+    "image",
+    "mm_projector",
+    "multi_modal_projector",
+    "patch_embed",
+    "resampler",
+    "merger",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,7 +100,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-modules",
         nargs="+",
-        default=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        default=list(ATTENTION_MLP_LORA_MODULES),
+        help=(
+            "Attention/MLP module suffixes to LoRA-train. These are resolved to "
+            "non-vision full module names before PEFT injection."
+        ),
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--overwrite", action="store_true")
@@ -114,7 +140,7 @@ def main() -> None:
             raise ValueError(f"Source cell {source_id} has fewer than two train labels")
         source_dir = args.output_dir / f"source_{slug(source_cell[0])}__{slug(source_cell[1])}"
         source_dir.mkdir(parents=True, exist_ok=True)
-        tokenizer, model, device = load_lora_model(args)
+        tokenizer, model, device, lora_model_metadata = load_lora_model(args)
         train_loss = train_adapter(
             model=model,
             tokenizer=tokenizer,
@@ -147,6 +173,7 @@ def main() -> None:
                     [row["ground_truth"] for row in validation_rows],
                     [validation_predictions[str(row["b_id"])] for row in validation_rows],
                 ),
+                "lora_model": lora_model_metadata,
             }
         )
         for target_cell in cells:
@@ -213,7 +240,9 @@ def main() -> None:
             "lora_r": int(args.lora_r),
             "lora_alpha": int(args.lora_alpha),
             "lora_dropout": float(args.lora_dropout),
-            "target_modules": list(args.target_modules),
+            "target_module_suffixes": list(args.target_modules),
+            "lora_scope": "attention_mlp_only",
+            "vision_modules_frozen": True,
         },
         "adapters": adapter_summaries,
         "metrics": metrics_rows,
@@ -249,7 +278,7 @@ def load_rows(rows_path: Path, split_manifest_path: Path) -> list[dict[str, Any]
     return [{**row, "split": row_splits[str(row["b_id"])]} for row in rows]
 
 
-def load_lora_model(args: argparse.Namespace) -> tuple[Any, Any, torch.device]:
+def load_lora_model(args: argparse.Namespace) -> tuple[Any, Any, torch.device, dict[str, Any]]:
     try:
         from peft import LoraConfig, TaskType, get_peft_model
     except ImportError as error:
@@ -266,17 +295,126 @@ def load_lora_model(args: argparse.Namespace) -> tuple[Any, Any, torch.device]:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
+    freeze_all_parameters(model)
+    frozen_vision = freeze_vision_modules(model)
+    resolved_targets = resolve_lora_target_modules(model, args.target_modules)
     config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=int(args.lora_r),
         lora_alpha=int(args.lora_alpha),
         lora_dropout=float(args.lora_dropout),
-        target_modules=list(args.target_modules),
+        target_modules=resolved_targets,
         bias="none",
     )
     model = get_peft_model(model, config)
+    # PEFT may add trainable adapter weights after the base-model freeze. Re-freeze
+    # vision paths defensively so multimodal Qwen checkpoints cannot train visual
+    # tower adapters even if their module suffixes resemble text attention names.
+    frozen_vision.extend(freeze_vision_modules(model))
+    lora_metadata = assert_attention_mlp_lora_only(
+        model,
+        resolved_targets=resolved_targets,
+        frozen_vision_modules=frozen_vision,
+    )
     model.print_trainable_parameters()
-    return tokenizer, model, device
+    return tokenizer, model, device, lora_metadata
+
+
+def freeze_all_parameters(model: Any) -> None:
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+
+
+def freeze_vision_modules(model: Any) -> list[str]:
+    frozen: list[str] = []
+    seen: set[str] = set()
+    for module_name, module in model.named_modules():
+        if not module_name or not is_vision_module_name(module_name):
+            continue
+        if module_name in seen:
+            continue
+        seen.add(module_name)
+        for parameter in module.parameters(recurse=True):
+            parameter.requires_grad = False
+        module.eval()
+        frozen.append(module_name)
+    return frozen
+
+
+def resolve_lora_target_modules(model: Any, requested_targets: list[str]) -> list[str]:
+    requested = tuple(dict.fromkeys(str(value) for value in requested_targets))
+    invalid = sorted(set(requested) - set(ATTENTION_MLP_LORA_MODULES))
+    if invalid:
+        raise ValueError(
+            "LoRA target modules must be limited to attention/MLP projections. "
+            f"Unsupported target suffixes: {invalid}"
+        )
+    resolved: list[str] = []
+    for module_name, module in model.named_modules():
+        if not module_name or is_vision_module_name(module_name):
+            continue
+        if not isinstance(module, nn.Linear):
+            continue
+        leaf_name = module_name.rsplit(".", 1)[-1]
+        if leaf_name in requested:
+            resolved.append(module_name)
+    if not resolved:
+        raise RuntimeError(
+            "No non-vision Attention/MLP LoRA target modules were found. "
+            f"Requested suffixes: {list(requested)}"
+        )
+    return sorted(resolved)
+
+
+def assert_attention_mlp_lora_only(
+    model: Any,
+    *,
+    resolved_targets: list[str],
+    frozen_vision_modules: list[str],
+) -> dict[str, Any]:
+    allowed_suffixes = tuple(f".{suffix}." for suffix in ATTENTION_MLP_LORA_MODULES)
+    trainable: list[tuple[str, int]] = [
+        (name, int(parameter.numel()))
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+    non_lora = [name for name, _ in trainable if "lora_" not in name]
+    if non_lora:
+        raise RuntimeError(
+            "Only LoRA adapter weights may be trainable; found non-LoRA trainable "
+            f"parameters: {non_lora[:10]}"
+        )
+    vision_trainable = [name for name, _ in trainable if is_vision_module_name(name)]
+    if vision_trainable:
+        raise RuntimeError(
+            "Vision-module parameters must remain frozen; found trainable "
+            f"vision parameters: {vision_trainable[:10]}"
+        )
+    outside_attention_mlp = [
+        name for name, _ in trainable
+        if not any(suffix in name for suffix in allowed_suffixes)
+    ]
+    if outside_attention_mlp:
+        raise RuntimeError(
+            "LoRA trainable parameters must be attached only to Attention/MLP "
+            f"projections; found: {outside_attention_mlp[:10]}"
+        )
+    trainable_parameters = sum(count for _, count in trainable)
+    return {
+        "resolved_target_module_count": len(resolved_targets),
+        "resolved_target_modules_sample": resolved_targets[:20],
+        "trainable_parameter_count": int(trainable_parameters),
+        "trainable_parameter_names_sample": [name for name, _ in trainable[:20]],
+        "frozen_vision_module_count": len(set(frozen_vision_modules)),
+        "frozen_vision_modules_sample": sorted(set(frozen_vision_modules))[:20],
+        "trainable_scope": "lora_attention_mlp_only",
+        "vision_trainable_parameter_count": 0,
+    }
+
+
+def is_vision_module_name(name: str) -> bool:
+    lowered = str(name).lower()
+    return any(keyword in lowered for keyword in VISION_MODULE_KEYWORDS)
 
 
 def train_adapter(
