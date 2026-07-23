@@ -9,6 +9,7 @@ __pycache__/
 # Local/runtime state
 .omx/
 .DS_Store
+.deps/
 
 # Local datasets
 datasets/

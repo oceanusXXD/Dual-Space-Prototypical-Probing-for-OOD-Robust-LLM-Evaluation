@@ -15,3 +15,4 @@ sentencepiece>=0.2
 protobuf>=5.0
 safetensors>=0.4
 datasets>=2.18
+peft>=0.12

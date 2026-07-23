@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import importlib.util
 
 import torch
 import transformers.utils as transformers_utils
@@ -59,7 +60,7 @@ def load_qwen_model(
         "revision": revision,
         "local_files_only": bool(local_files_only),
         "attn_implementation": attn_implementation,
-        "low_cpu_mem_usage": True,
+        "low_cpu_mem_usage": importlib.util.find_spec("accelerate") is not None,
     }
     try:
         model = AutoModelForCausalLM.from_pretrained(source, dtype=dtype, **model_kwargs)
